@@ -189,6 +189,31 @@ EOF
 systemctl enable -q --now poznote-reminder-worker poznote-s3-backup-worker
 msg_ok "Created Background Worker Services"
 
+msg_info "Installing MCP Server"
+$STD apt install -y python3-venv
+$STD python3 -m venv /opt/poznote-mcp
+$STD /opt/poznote-mcp/bin/pip install /opt/poznote/mcp-server
+cat <<EOF >/etc/systemd/system/poznote-mcp.service
+[Unit]
+Description=Poznote MCP Server
+After=network.target nginx.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+Restart=always
+Environment=POZNOTE_API_URL=http://127.0.0.1:8040/api/v1
+Environment=POZNOTE_SERVICE_TOKEN_FILE=/var/www/html/data/.mcp_token
+ExecStart=/opt/poznote-mcp/bin/poznote-mcp serve --host=127.0.0.1 --port=8045
+WorkingDirectory=/opt/poznote-mcp
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable -q --now poznote-mcp
+msg_ok "Installed MCP Server"
+
 motd_ssh
 customize
 cleanup_lxc

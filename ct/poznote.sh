@@ -35,7 +35,7 @@ function update_script() {
   if check_for_gh_release "poznote" "timothepoznanski/poznote"; then
     msg_info "Stopping Service"
     systemctl stop nginx
-    systemctl stop poznote-reminder-worker poznote-s3-backup-worker 2>/dev/null || true
+    systemctl stop poznote-reminder-worker poznote-s3-backup-worker poznote-mcp 2>/dev/null || true
     msg_ok "Stopped Service"
 
     create_backup /var/www/html/data
@@ -218,9 +218,45 @@ EOF
       msg_ok "Created S3 Backup Worker Service"
     fi
 
+    if [[ ! -x /opt/poznote-mcp/bin/pip ]]; then
+      msg_info "Installing MCP Server"
+      $STD apt install -y python3-venv
+      $STD python3 -m venv /opt/poznote-mcp
+      $STD /opt/poznote-mcp/bin/pip install /opt/poznote/mcp-server
+      msg_ok "Installed MCP Server"
+    else
+      msg_info "Updating MCP Server"
+      $STD /opt/poznote-mcp/bin/pip install --upgrade /opt/poznote/mcp-server
+      msg_ok "Updated MCP Server"
+    fi
+
+    if [[ ! -f /etc/systemd/system/poznote-mcp.service ]]; then
+      msg_info "Creating MCP Server Service"
+      cat <<EOF >/etc/systemd/system/poznote-mcp.service
+[Unit]
+Description=Poznote MCP Server
+After=network.target nginx.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+Restart=always
+Environment=POZNOTE_API_URL=http://127.0.0.1:8040/api/v1
+Environment=POZNOTE_SERVICE_TOKEN_FILE=/var/www/html/data/.mcp_token
+ExecStart=/opt/poznote-mcp/bin/poznote-mcp serve --host=127.0.0.1 --port=8045
+WorkingDirectory=/opt/poznote-mcp
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      systemctl daemon-reload
+      msg_ok "Created MCP Server Service"
+    fi
+
     msg_info "Starting Service"
     systemctl start nginx
-    systemctl enable -q --now poznote-reminder-worker poznote-s3-backup-worker
+    systemctl enable -q --now poznote-reminder-worker poznote-s3-backup-worker poznote-mcp
     msg_ok "Started Service"
     msg_ok "Updated successfully!"
   fi
