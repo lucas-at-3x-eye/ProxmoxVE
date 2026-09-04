@@ -33,15 +33,33 @@ chmod +x /opt/poznote/init.sh
 $STD /opt/poznote/init.sh
 msg_ok "Initialized Poznote Data Directory"
 
+msg_info "Configuring MCP Proxy Token"
+if [[ -z "${var_mcp_proxy_token:-}" ]]; then
+  var_mcp_proxy_token="$(openssl rand -hex 32)"
+  MCP_TOKEN_GENERATED=1
+fi
+cat <<EOF >/etc/nginx/poznote_mcp_token.map
+"Bearer ${var_mcp_proxy_token}" 1;
+EOF
+chmod 600 /etc/nginx/poznote_mcp_token.map
+msg_ok "Configured MCP Proxy Token"
+
 msg_info "Configuring Nginx"
 PHP_SOCK=$(get_php_fpm_socket)
 cat <<EOF >/etc/nginx/sites-available/poznote
+map_hash_bucket_size 128;
+
 # The Excalidraw editor must keep its window.opener relationship with
 # libraries.excalidraw.com so "Add to Excalidraw" can hand the chosen library
 # back to the already-open editor tab; COOP same-origin would sever it.
 map \$uri \$poznote_coop {
     default                  "same-origin";
     /excalidraw_editor.php   "unsafe-none";
+}
+
+map \$http_authorization \$poznote_mcp_authorized {
+    include /etc/nginx/poznote_mcp_token.map;
+    default 0;
 }
 
 server {
@@ -133,6 +151,24 @@ server {
         deny all;
     }
 
+    location /mcp {
+        allow 127.0.0.1;
+        allow 10.0.0.0/8;
+        allow 172.16.0.0/12;
+        allow 192.168.0.0/16;
+        deny all;
+
+        if (\$poznote_mcp_authorized = 0) {
+            return 401;
+        }
+
+        proxy_pass http://127.0.0.1:8045/mcp;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header Connection "";
+        proxy_read_timeout 300;
+    }
+
     location ~* ^/pwa/poznote(-[0-9]+)?\.png$ {
         expires 1y;
         add_header Cache-Control "public, immutable";
@@ -217,3 +253,8 @@ msg_ok "Installed MCP Server"
 motd_ssh
 customize
 cleanup_lxc
+
+if [[ "${MCP_TOKEN_GENERATED:-0}" == "1" ]]; then
+  echo "Generated MCP proxy token - record this now, it will not be shown again:"
+  echo "Authorization: Bearer ${var_mcp_proxy_token}"
+fi

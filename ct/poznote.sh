@@ -17,6 +17,8 @@ var_version="${var_version:-13}"
 var_arm64="${var_arm64:-yes}"
 var_unprivileged="${var_unprivileged:-1}"
 
+export var_mcp_proxy_token="${var_mcp_proxy_token:-}"
+
 header_info "$APP"
 variables
 color
@@ -54,16 +56,34 @@ function update_script() {
     $STD /opt/poznote/init.sh
     msg_ok "Initialized Poznote Data Directory"
 
+    if [[ ! -f /etc/nginx/poznote_mcp_token.map ]]; then
+      msg_info "Configuring MCP Proxy Token"
+      MCP_PROXY_TOKEN="$(openssl rand -hex 32)"
+      MCP_TOKEN_GENERATED=1
+      cat <<EOF >/etc/nginx/poznote_mcp_token.map
+"Bearer ${MCP_PROXY_TOKEN}" 1;
+EOF
+      chmod 600 /etc/nginx/poznote_mcp_token.map
+      msg_ok "Configured MCP Proxy Token"
+    fi
+
     msg_info "Updating Nginx Configuration"
     [[ -f /etc/nginx/sites-available/poznote ]] && cp /etc/nginx/sites-available/poznote /etc/nginx/sites-available/poznote.bak
     PHP_SOCK=$(get_php_fpm_socket)
     cat <<EOF >/etc/nginx/sites-available/poznote
+map_hash_bucket_size 128;
+
 # The Excalidraw editor must keep its window.opener relationship with
 # libraries.excalidraw.com so "Add to Excalidraw" can hand the chosen library
 # back to the already-open editor tab; COOP same-origin would sever it.
 map \$uri \$poznote_coop {
     default                  "same-origin";
     /excalidraw_editor.php   "unsafe-none";
+}
+
+map \$http_authorization \$poznote_mcp_authorized {
+    include /etc/nginx/poznote_mcp_token.map;
+    default 0;
 }
 
 server {
@@ -153,6 +173,24 @@ server {
 
     location ~ ^/(data|config)/ {
         deny all;
+    }
+
+    location /mcp {
+        allow 127.0.0.1;
+        allow 10.0.0.0/8;
+        allow 172.16.0.0/12;
+        allow 192.168.0.0/16;
+        deny all;
+
+        if (\$poznote_mcp_authorized = 0) {
+            return 401;
+        }
+
+        proxy_pass http://127.0.0.1:8045/mcp;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header Connection "";
+        proxy_read_timeout 300;
     }
 
     location ~* ^/pwa/poznote(-[0-9]+)?\.png$ {
@@ -258,6 +296,12 @@ EOF
     systemctl start nginx
     systemctl enable -q --now poznote-reminder-worker poznote-s3-backup-worker poznote-mcp
     msg_ok "Started Service"
+
+    if [[ "${MCP_TOKEN_GENERATED:-0}" == "1" ]]; then
+      echo "Generated MCP proxy token - record this now, it will not be shown again:"
+      echo "Authorization: Bearer ${MCP_PROXY_TOKEN}"
+    fi
+
     msg_ok "Updated successfully!"
   fi
   exit
@@ -271,3 +315,7 @@ msg_ok "Completed Successfully!\n"
 echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
 echo -e "${INFO}${YW}Access it using the following URL:${CL}"
 echo -e "${GATEWAY}${BGN}http://${IP}:8040${CL}"
+echo -e "${INFO}${YW}MCP endpoint (local/LAN only, bearer token required off-localhost):${CL}"
+echo -e "${GATEWAY}${BGN}http://${IP}:8040/mcp${CL}"
+echo -e "${INFO}${YW}Token was printed once during install; recover it with:${CL}"
+echo -e "${TAB}${BGN}grep Bearer /etc/nginx/poznote_mcp_token.map${CL}"
